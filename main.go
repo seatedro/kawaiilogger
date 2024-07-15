@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -14,16 +15,15 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/robotn/gohook"
+	"github.com/seatedro/kawaiilogger/db"
 )
 
 type Metrics struct {
-	Keypresses     int
-	MouseClicks    int
-	IdleTime       time.Duration
-	CopyPasteCount int
+	Keypresses  int
+	MouseClicks int
 }
 
-var db *sql.DB
+var dbQueries *db.Queries
 var metrics *Metrics
 var logger *log.Logger
 var logDir string
@@ -70,13 +70,13 @@ func main() {
 		logger.Fatal("Error loading .env file:", err)
 	}
 
-	db, err = sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	sqlDb, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		logger.Fatal("Error connecting to database:", err)
 	}
-	defer db.Close()
+	defer sqlDb.Close()
 
-	createDbSchema()
+	dbQueries = db.New(sqlDb)
 
 	metrics = &Metrics{}
 
@@ -87,12 +87,11 @@ func main() {
 
 func onReady() {
 	systray.SetIcon(getIcon())
-	systray.SetTitle("kl")
+	// systray.SetTitle("kl")
 	systray.SetTooltip("KawaiiLogger")
 
 	mKeyPresses := systray.AddMenuItem("Keypresses: 0", "Number of keypresses")
 	mMouseClicks := systray.AddMenuItem("Mouse Clicks: 0", "Number of mouse clicks")
-	mCopyPaste := systray.AddMenuItem("Copy/Paste: 0", "Number of copy/paste operations")
 
 	systray.AddSeparator()
 	mOpenLog := systray.AddMenuItem("Open Log File", "Open the log file")
@@ -116,7 +115,6 @@ func onReady() {
 			time.Sleep(time.Second)
 			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", metrics.Keypresses))
 			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", metrics.MouseClicks))
-			mCopyPaste.SetTitle(fmt.Sprintf("Copy/Paste: %d", metrics.CopyPasteCount))
 		}
 	}()
 }
@@ -157,17 +155,11 @@ func collectMetrics() {
 		metrics.MouseClicks++
 	})
 
-	hook.Register(hook.KeyDown, nil, func(e hook.Event) {
-		if e.Rawcode == 67 && e.Keycode == 0 { // 'C' key
-			metrics.CopyPasteCount++
-		} else if e.Rawcode == 86 && e.Keycode == 0 { // 'V' key
-			metrics.CopyPasteCount++
-		}
-	})
+	// how the fuck do i track copy/paste?
 
 	go func() {
 		for {
-			time.Sleep(time.Second * 30)
+			time.Sleep(time.Second * 60)
 			saveMetrics()
 		}
 	}()
@@ -176,37 +168,16 @@ func collectMetrics() {
 	<-hook.Process(s)
 }
 
-func createDbSchema() {
-
-	_, err := db.Exec(`CREATE DATABASE kawaiilogger`)
-	if err != nil {
-		logger.Printf("Error creating the database: %v", err)
-	} else {
-		logger.Printf("Database created successfully")
-	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS metrics (
-		keypresses NUMERIC,
-		mouse_clicks NUMERIC,
-		idle_time REAL,
-		copy_paste_count NUMERIC,
-		timestamp TIMESTAMP
-	)`)
-	if err != nil {
-		logger.Printf("Error creating the table: %v", err)
-	} else {
-		logger.Printf("Table created successfully")
-	}
-}
-
 func saveMetrics() {
-	_, err := db.Exec(`INSERT INTO metrics 
-		(keypresses, mouse_clicks, idle_time, copy_paste_count, timestamp) 
-		VALUES ($1, $2, $3, $4, $5)`,
-		metrics.Keypresses, metrics.MouseClicks, metrics.IdleTime.Seconds(), metrics.CopyPasteCount, time.Now())
+	_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
+		Keypresses:  int32(metrics.Keypresses),
+		MouseClicks: int32(metrics.MouseClicks),
+	})
 	if err != nil {
 		logger.Printf("Error saving metrics: %v", err)
 	} else {
-		logger.Println("Metrics saved successfully")
+		metrics.Keypresses = 0
+		metrics.MouseClicks = 0
 	}
 }
 
