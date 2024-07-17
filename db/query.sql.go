@@ -11,34 +11,40 @@ import (
 
 const createMetrics = `-- name: CreateMetrics :one
 INSERT INTO metrics (
-    keypresses, mouse_clicks, mouse_distance, scroll_distance
+    keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_distance_in, scroll_distance_mi
 ) VALUES (
-    $1, $2, $3, $4
+    $1, $2, $3, $4, $5, $6
 )
-RETURNING id, keypresses, mouse_clicks, mouse_distance, scroll_distance, timestamp
+RETURNING id, keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_distance_in, scroll_distance_mi, timestamp
 `
 
 type CreateMetricsParams struct {
-	Keypresses     int32
-	MouseClicks    int32
-	MouseDistance  float64
-	ScrollDistance float64
+	Keypresses       int32
+	MouseClicks      int32
+	MouseDistanceIn  float64
+	MouseDistanceMi  float64
+	ScrollDistanceIn float64
+	ScrollDistanceMi float64
 }
 
 func (q *Queries) CreateMetrics(ctx context.Context, arg CreateMetricsParams) (Metric, error) {
 	row := q.db.QueryRowContext(ctx, createMetrics,
 		arg.Keypresses,
 		arg.MouseClicks,
-		arg.MouseDistance,
-		arg.ScrollDistance,
+		arg.MouseDistanceIn,
+		arg.MouseDistanceMi,
+		arg.ScrollDistanceIn,
+		arg.ScrollDistanceMi,
 	)
 	var i Metric
 	err := row.Scan(
 		&i.ID,
 		&i.Keypresses,
 		&i.MouseClicks,
-		&i.MouseDistance,
-		&i.ScrollDistance,
+		&i.MouseDistanceIn,
+		&i.MouseDistanceMi,
+		&i.ScrollDistanceIn,
+		&i.ScrollDistanceMi,
 		&i.Timestamp,
 	)
 	return i, err

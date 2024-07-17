@@ -4,6 +4,7 @@ go 1.21.0
 
 require (
 	github.com/getlantern/systray v1.2.2
+	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20240506104042-037f3cc74f2a
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
 	github.com/robotn/gohook v0.41.0

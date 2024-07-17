@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
+	"github.com/go-gl/glfw/v3.3/glfw"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	hook "github.com/robotn/gohook"
@@ -20,17 +21,21 @@ import (
 )
 
 type Metrics struct {
-	Keypresses     int
-	MouseClicks    int
-	MouseDistance  float64
-	ScrollDistance float64
+	Keypresses       int
+	MouseClicks      int
+	MouseDistanceIn  float64
+	MouseDistanceMi  float64
+	ScrollDistanceIn float64
+	ScrollDistanceMi float64
 }
 
 type TotalMetrics struct {
-	TotalKeypresses     int
-	TotalMouseClicks    int
-	TotalMouseDistance  float64
-	TotalScrollDistance float64
+	TotalKeypresses       int
+	TotalMouseClicks      int
+	TotalMouseDistanceIn  float64
+	TotalMouseDistanceMi  float64
+	TotalScrollDistanceIn float64
+	TotalScrollDistanceMi float64
 }
 
 var (
@@ -40,6 +45,7 @@ var (
 	logger                 *log.Logger
 	logDir                 string
 	lastMouseX, lastMouseY int16
+	pixelsPerInch          float64
 )
 
 func initLogger() {
@@ -78,6 +84,7 @@ func initLogger() {
 
 func main() {
 	initLogger()
+	pixelsPerInch = calculatePixelsPerInch()
 
 	logger.Printf("Current working directory: %s\n", os.Getenv("PWD"))
 	err := godotenv.Load()
@@ -107,8 +114,8 @@ func onReady() {
 
 	mKeyPresses := systray.AddMenuItem("Keypresses: 0", "Number of keypresses")
 	mMouseClicks := systray.AddMenuItem("Mouse Clicks: 0", "Number of mouse clicks")
-	mMouseDistance := systray.AddMenuItem("Mouse Travel Distance: 0", "Distance moved by mouse")
-	mScrollDistance := systray.AddMenuItem("ScrollWheel Travel Distance: 0", "Distance moved by scrollwheel")
+	mMouseDistance := systray.AddMenuItem("Mouse Travel (in) 0 / (mi) 0", "Distance moved by mouse")
+	mScrollDistance := systray.AddMenuItem("ScrollWheel Travel (in) 0 / (mi) 0", "Distance moved by scrollwheel")
 
 	systray.AddSeparator()
 	mOpenLog := systray.AddMenuItem("Open Log File", "Open the log file")
@@ -132,8 +139,8 @@ func onReady() {
 			time.Sleep(time.Second)
 			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", totalMetrics.TotalKeypresses))
 			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", totalMetrics.TotalMouseClicks))
-			mMouseDistance.SetTitle(fmt.Sprintf("Mouse Travel: %.2f", totalMetrics.TotalMouseDistance))
-			mScrollDistance.SetTitle(fmt.Sprintf("ScrollWheel Travel: %.2f", totalMetrics.TotalScrollDistance))
+			mMouseDistance.SetTitle(fmt.Sprintf("Mouse Travel (in) %.2f / (mi) %.2f", totalMetrics.TotalMouseDistanceIn, totalMetrics.TotalMouseDistanceMi))
+			mScrollDistance.SetTitle(fmt.Sprintf("ScrollWheel Travel (in) %.2f / (mi) %.2f", totalMetrics.TotalScrollDistanceIn, totalMetrics.TotalScrollDistanceMi))
 		}
 	}()
 }
@@ -180,15 +187,20 @@ func collectMetrics() {
 
 	hook.Register(hook.MouseMove, nil, func(e hook.Event) {
 		newX, newY := e.X, e.Y
-		distance := calculateDistance(lastMouseX, lastMouseY, newX, newY)
-		metrics.MouseDistance += distance
-		totalMetrics.TotalMouseDistance += distance
+		distance := calculateDistance(lastMouseX, lastMouseY, newX, newY) / pixelsPerInch
+		metrics.MouseDistanceIn += distance
+		metrics.MouseDistanceMi += (distance / 63360)
+		totalMetrics.TotalMouseDistanceIn += (distance)
+		totalMetrics.TotalMouseDistanceMi += (distance / 63360)
 		lastMouseX, lastMouseY = newX, newY
 	})
 
 	hook.Register(hook.MouseWheel, nil, func(e hook.Event) {
-		metrics.ScrollDistance += math.Abs(float64(e.Amount))
-		totalMetrics.TotalScrollDistance += math.Abs(float64(e.Rotation))
+		distance := (math.Abs(float64(e.Rotation)) / pixelsPerInch)
+		metrics.ScrollDistanceIn += distance
+		metrics.ScrollDistanceMi += (distance / 633660)
+		totalMetrics.TotalScrollDistanceIn += distance
+		totalMetrics.TotalScrollDistanceMi += (distance / 63360)
 	})
 
 	go func() {
@@ -204,18 +216,22 @@ func collectMetrics() {
 
 func saveMetrics() {
 	_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
-		Keypresses:     int32(metrics.Keypresses),
-		MouseClicks:    int32(metrics.MouseClicks),
-		MouseDistance:  metrics.MouseDistance,
-		ScrollDistance: metrics.ScrollDistance,
+		Keypresses:       int32(metrics.Keypresses),
+		MouseClicks:      int32(metrics.MouseClicks),
+		MouseDistanceIn:  metrics.MouseDistanceIn,
+		MouseDistanceMi:  metrics.MouseDistanceMi,
+		ScrollDistanceIn: metrics.ScrollDistanceIn,
+		ScrollDistanceMi: metrics.ScrollDistanceMi,
 	})
 	if err != nil {
 		logger.Printf("Error saving metrics: %v", err)
 	} else {
 		metrics.Keypresses = 0
 		metrics.MouseClicks = 0
-		metrics.MouseDistance = 0
-		metrics.ScrollDistance = 0
+		metrics.MouseDistanceIn = 0
+		metrics.MouseDistanceMi = 0
+		metrics.ScrollDistanceIn = 0
+		metrics.ScrollDistanceMi = 0
 	}
 }
 
@@ -223,6 +239,26 @@ func calculateDistance(x1, y1, x2, y2 int16) float64 {
 	dx := float64(x2 - x1)
 	dy := float64(y2 - y1)
 	return math.Sqrt(dx*dx + dy*dy)
+}
+
+func calculatePixelsPerInch() float64 {
+	if err := glfw.Init(); err != nil {
+		panic(err)
+	}
+	defer glfw.Terminate()
+
+	primaryMonitor := glfw.GetPrimaryMonitor()
+	videoMode := primaryMonitor.GetVideoMode()
+
+	widthMM, heightMM := primaryMonitor.GetPhysicalSize()
+	widthIn, heightIn := float64(widthMM)/25.4, float64(heightMM)/25.4
+
+	widthDpi := float64(videoMode.Width) / widthIn
+	heightDpi := float64(videoMode.Height) / heightIn
+
+	avgDpi := (widthDpi + heightDpi) / 2
+
+	return avgDpi
 }
 
 func getIcon() []byte {
