@@ -26,9 +26,17 @@ type Metrics struct {
 	ScrollDistance float64
 }
 
+type TotalMetrics struct {
+	TotalKeypresses     int
+	TotalMouseClicks    int
+	TotalMouseDistance  float64
+	TotalScrollDistance float64
+}
+
 var (
 	dbQueries              *db.Queries
 	metrics                *Metrics
+	totalMetrics           *TotalMetrics
 	logger                 *log.Logger
 	logDir                 string
 	lastMouseX, lastMouseY int16
@@ -86,6 +94,7 @@ func main() {
 	dbQueries = db.New(sqlDb)
 
 	metrics = &Metrics{}
+	totalMetrics = &TotalMetrics{}
 
 	go collectMetrics()
 
@@ -121,10 +130,10 @@ func onReady() {
 	go func() {
 		for {
 			time.Sleep(time.Second)
-			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", metrics.Keypresses))
-			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", metrics.MouseClicks))
-			mMouseDistance.SetTitle(fmt.Sprintf("Mouse Travel: %.2f", metrics.MouseDistance))
-			mScrollDistance.SetTitle(fmt.Sprintf("ScrollWheel Travel: %.2f", metrics.ScrollDistance))
+			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", totalMetrics.TotalKeypresses))
+			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", totalMetrics.TotalMouseClicks))
+			mMouseDistance.SetTitle(fmt.Sprintf("Mouse Travel: %.2f", totalMetrics.TotalMouseDistance))
+			mScrollDistance.SetTitle(fmt.Sprintf("ScrollWheel Travel: %.2f", totalMetrics.TotalScrollDistance))
 		}
 	}()
 }
@@ -159,10 +168,12 @@ func openLogFile() {
 func collectMetrics() {
 	hook.Register(hook.KeyDown, nil, func(e hook.Event) {
 		metrics.Keypresses++
+		totalMetrics.TotalKeypresses++
 	})
 
 	hook.Register(hook.MouseDown, nil, func(e hook.Event) {
 		metrics.MouseClicks++
+		totalMetrics.TotalMouseClicks++
 	})
 
 	// how the fuck do i track copy/paste?
@@ -171,11 +182,13 @@ func collectMetrics() {
 		newX, newY := e.X, e.Y
 		distance := calculateDistance(lastMouseX, lastMouseY, newX, newY)
 		metrics.MouseDistance += distance
+		totalMetrics.TotalMouseDistance += distance
 		lastMouseX, lastMouseY = newX, newY
 	})
 
 	hook.Register(hook.MouseWheel, nil, func(e hook.Event) {
-		metrics.ScrollDistance += float64(e.Rotation)
+		metrics.ScrollDistance += math.Abs(float64(e.Amount))
+		totalMetrics.TotalScrollDistance += math.Abs(float64(e.Rotation))
 	})
 
 	go func() {
