@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -38,14 +39,26 @@ type TotalMetrics struct {
 	TotalScrollDistanceMi float64
 }
 
+type Monitor struct {
+	XPos     int
+	YPos     int
+	WidthPx  int
+	HeightPx int
+	WidthIn  int
+	HeightIn int
+	Ppi      int
+}
+
 var (
 	dbQueries              *db.Queries
 	metrics                *Metrics
 	totalMetrics           *TotalMetrics
 	logger                 *log.Logger
 	logDir                 string
-	lastMouseX, lastMouseY int16
+	lastMouseX, lastMouseY int
 	pixelsPerInch          float64
+	monitors               []Monitor
+	monitorsMutex          sync.RWMutex
 )
 
 func initLogger() {
@@ -82,8 +95,18 @@ func initLogger() {
 	logger.Println("kawaiilogger started")
 }
 
+func glfwInit() {
+	if err := glfw.Init(); err != nil {
+		panic(err)
+	}
+	defer glfw.Terminate()
+
+	monitors = getMonitors()
+}
+
 func main() {
 	initLogger()
+	glfwInit()
 	pixelsPerInch = calculatePixelsPerInch()
 
 	logger.Printf("Current working directory: %s\n", os.Getenv("PWD"))
@@ -186,8 +209,8 @@ func collectMetrics() {
 	// how the fuck do i track copy/paste?
 
 	hook.Register(hook.MouseMove, nil, func(e hook.Event) {
-		newX, newY := e.X, e.Y
-		distance := calculateDistance(lastMouseX, lastMouseY, newX, newY) / pixelsPerInch
+		newX, newY := int(e.X), int(e.Y)
+		distance := calculateMultiMonitorDistance(lastMouseX, lastMouseY, newX, newY)
 		metrics.MouseDistanceIn += distance
 		metrics.MouseDistanceMi += (distance / 63360)
 		totalMetrics.TotalMouseDistanceIn += (distance)
@@ -235,7 +258,7 @@ func saveMetrics() {
 	}
 }
 
-func calculateDistance(x1, y1, x2, y2 int16) float64 {
+func calculateDistance(x1, y1, x2, y2 int) float64 {
 	dx := float64(x2 - x1)
 	dy := float64(y2 - y1)
 	return math.Sqrt(dx*dx + dy*dy)
@@ -259,6 +282,81 @@ func calculatePixelsPerInch() float64 {
 	avgDpi := (widthDpi + heightDpi) / 2
 
 	return avgDpi
+}
+
+func getMonitors() []Monitor {
+	glfwMonitors := glfw.GetMonitors()
+	monitors := make([]Monitor, len(glfwMonitors))
+
+	for i, glfwMonitor := range glfwMonitors {
+		videoMode := glfwMonitor.GetVideoMode()
+
+		widthMM, heightMM := glfwMonitor.GetPhysicalSize()
+		widthIn, heightIn := float64(widthMM)/25.4, float64(heightMM)/25.4
+		xPos, yPos := glfwMonitor.GetPos()
+
+		widthDpi := float64(videoMode.Width) / widthIn
+		heightDpi := float64(videoMode.Height) / heightIn
+
+		ppi := (widthDpi + heightDpi) / 2
+
+		monitors[i] = Monitor{
+			XPos:     xPos,
+			YPos:     yPos,
+			WidthPx:  videoMode.Width,
+			HeightPx: videoMode.Height,
+			WidthIn:  int(widthIn),
+			HeightIn: int(heightIn),
+			Ppi:      int(ppi),
+		}
+	}
+
+	return monitors
+}
+
+func calculateMultiMonitorDistance(x1, y1, x2, y2 int) float64 {
+	monitorsMutex.RLock()
+	defer monitorsMutex.RUnlock()
+
+	m1 := getMonitorForCoordinates(x1, y1)
+	m2 := getMonitorForCoordinates(x2, y2)
+
+	if m1 == m2 {
+		return calculateDistance(x1, y1, x2, y2) / float64(m1.Ppi)
+	}
+
+	sx1, sy1 := getMonitorSideCoordinates(x1, y1, x2, y2, m1)
+	d1 := calculateDistance(x1, y1, sx1, sy1) / float64(m1.Ppi)
+
+	sx2, sy2 := getMonitorSideCoordinates(x1, y1, x2, y2, m2)
+	d2 := calculateDistance(x1, y1, sx2, sy2) / float64(m1.Ppi)
+
+	return d1 + d2
+}
+
+func getMonitorForCoordinates(x, y int) Monitor {
+	for _, m := range monitors {
+		if x >= m.XPos && x < (m.XPos+m.WidthPx) && y >= m.YPos && y < (m.YPos+m.HeightPx) {
+			return m
+		}
+	}
+	// Default to monitor 0
+	return monitors[0]
+}
+
+func getMonitorSideCoordinates(x1, y1, x2, y2 int, m Monitor) (int, int) {
+	// Get the coordinates for the side where the mouse leaves.
+	if x2 < m.XPos {
+		return m.XPos, y1
+	} else if x2 >= m.XPos+m.WidthPx {
+		return m.XPos + m.WidthPx - 1, y1
+	} else if y2 < m.YPos {
+		return x1, m.YPos
+	} else if y2 >= m.YPos+m.HeightPx {
+		return x1, m.YPos + m.HeightPx - 1
+	}
+
+	return x2, y2
 }
 
 func getIcon() []byte {
