@@ -1,32 +1,65 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/getlantern/systray"
+	"github.com/go-gl/glfw/v3.3/glfw"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/robotn/gohook"
+	hook "github.com/robotn/gohook"
+	"github.com/seatedro/kawaiilogger/db"
 )
 
 type Metrics struct {
-	Keypresses     int
-	MouseClicks    int
-	IdleTime       time.Duration
-	CopyPasteCount int
+	Keypresses       int
+	MouseClicks      int
+	MouseDistanceIn  float64
+	MouseDistanceMi  float64
+	ScrollDistanceIn float64
+	ScrollDistanceMi float64
 }
 
-var db *sql.DB
-var metrics *Metrics
-var logger *log.Logger
-var logDir string
+type TotalMetrics struct {
+	TotalKeypresses       int
+	TotalMouseClicks      int
+	TotalMouseDistanceIn  float64
+	TotalMouseDistanceMi  float64
+	TotalScrollDistanceIn float64
+	TotalScrollDistanceMi float64
+}
+
+type Monitor struct {
+	XPos     int
+	YPos     int
+	WidthPx  int
+	HeightPx int
+	WidthIn  int
+	HeightIn int
+	Ppi      int
+}
+
+var (
+	dbQueries              *db.Queries
+	metrics                *Metrics
+	totalMetrics           *TotalMetrics
+	logger                 *log.Logger
+	logDir                 string
+	lastMouseX, lastMouseY int
+	pixelsPerInch          float64
+	monitors               []Monitor
+	monitorsMutex          sync.RWMutex
+)
 
 func initLogger() {
 	homeDir, err := os.UserHomeDir()
@@ -62,23 +95,36 @@ func initLogger() {
 	logger.Println("kawaiilogger started")
 }
 
+func glfwInit() {
+	if err := glfw.Init(); err != nil {
+		panic(err)
+	}
+	defer glfw.Terminate()
+
+	monitors = getMonitors()
+}
+
 func main() {
 	initLogger()
+	glfwInit()
+	pixelsPerInch = calculatePixelsPerInch()
 
+	logger.Printf("Current working directory: %s\n", os.Getenv("PWD"))
 	err := godotenv.Load()
 	if err != nil {
 		logger.Fatal("Error loading .env file:", err)
 	}
 
-	db, err = sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	sqlDb, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		logger.Fatal("Error connecting to database:", err)
 	}
-	defer db.Close()
+	defer sqlDb.Close()
 
-	createDbSchema()
+	dbQueries = db.New(sqlDb)
 
 	metrics = &Metrics{}
+	totalMetrics = &TotalMetrics{}
 
 	go collectMetrics()
 
@@ -87,12 +133,12 @@ func main() {
 
 func onReady() {
 	systray.SetIcon(getIcon())
-	systray.SetTitle("kl")
 	systray.SetTooltip("KawaiiLogger")
 
 	mKeyPresses := systray.AddMenuItem("Keypresses: 0", "Number of keypresses")
 	mMouseClicks := systray.AddMenuItem("Mouse Clicks: 0", "Number of mouse clicks")
-	mCopyPaste := systray.AddMenuItem("Copy/Paste: 0", "Number of copy/paste operations")
+	mMouseDistance := systray.AddMenuItem("Mouse Travel (in) 0 / (mi) 0", "Distance moved by mouse")
+	mScrollDistance := systray.AddMenuItem("ScrollWheel Travel (in) 0 / (mi) 0", "Distance moved by scrollwheel")
 
 	systray.AddSeparator()
 	mOpenLog := systray.AddMenuItem("Open Log File", "Open the log file")
@@ -114,9 +160,10 @@ func onReady() {
 	go func() {
 		for {
 			time.Sleep(time.Second)
-			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", metrics.Keypresses))
-			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", metrics.MouseClicks))
-			mCopyPaste.SetTitle(fmt.Sprintf("Copy/Paste: %d", metrics.CopyPasteCount))
+			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", totalMetrics.TotalKeypresses))
+			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", totalMetrics.TotalMouseClicks))
+			mMouseDistance.SetTitle(fmt.Sprintf("Mouse Travel (in) %.2f / (mi) %.2f", totalMetrics.TotalMouseDistanceIn, totalMetrics.TotalMouseDistanceMi))
+			mScrollDistance.SetTitle(fmt.Sprintf("ScrollWheel Travel (in) %.2f / (mi) %.2f", totalMetrics.TotalScrollDistanceIn, totalMetrics.TotalScrollDistanceMi))
 		}
 	}()
 }
@@ -151,23 +198,37 @@ func openLogFile() {
 func collectMetrics() {
 	hook.Register(hook.KeyDown, nil, func(e hook.Event) {
 		metrics.Keypresses++
+		totalMetrics.TotalKeypresses++
 	})
 
 	hook.Register(hook.MouseDown, nil, func(e hook.Event) {
 		metrics.MouseClicks++
+		totalMetrics.TotalMouseClicks++
 	})
 
-	hook.Register(hook.KeyDown, nil, func(e hook.Event) {
-		if e.Rawcode == 67 && e.Keycode == 0 { // 'C' key
-			metrics.CopyPasteCount++
-		} else if e.Rawcode == 86 && e.Keycode == 0 { // 'V' key
-			metrics.CopyPasteCount++
-		}
+	// how the fuck do i track copy/paste?
+
+	hook.Register(hook.MouseMove, nil, func(e hook.Event) {
+		newX, newY := int(e.X), int(e.Y)
+		distance := calculateMultiMonitorDistance(lastMouseX, lastMouseY, newX, newY)
+		metrics.MouseDistanceIn += distance
+		metrics.MouseDistanceMi += (distance / 63360)
+		totalMetrics.TotalMouseDistanceIn += (distance)
+		totalMetrics.TotalMouseDistanceMi += (distance / 63360)
+		lastMouseX, lastMouseY = newX, newY
+	})
+
+	hook.Register(hook.MouseWheel, nil, func(e hook.Event) {
+		distance := (math.Abs(float64(e.Rotation)) / pixelsPerInch)
+		metrics.ScrollDistanceIn += distance
+		metrics.ScrollDistanceMi += (distance / 633660)
+		totalMetrics.TotalScrollDistanceIn += distance
+		totalMetrics.TotalScrollDistanceMi += (distance / 63360)
 	})
 
 	go func() {
 		for {
-			time.Sleep(time.Second * 30)
+			time.Sleep(time.Second * 60)
 			saveMetrics()
 		}
 	}()
@@ -176,38 +237,126 @@ func collectMetrics() {
 	<-hook.Process(s)
 }
 
-func createDbSchema() {
-
-	_, err := db.Exec(`CREATE DATABASE kawaiilogger`)
-	if err != nil {
-		logger.Printf("Error creating the database: %v", err)
-	} else {
-		logger.Printf("Database created successfully")
-	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS metrics (
-		keypresses NUMERIC,
-		mouse_clicks NUMERIC,
-		idle_time REAL,
-		copy_paste_count NUMERIC,
-		timestamp TIMESTAMP
-	)`)
-	if err != nil {
-		logger.Printf("Error creating the table: %v", err)
-	} else {
-		logger.Printf("Table created successfully")
-	}
-}
-
 func saveMetrics() {
-	_, err := db.Exec(`INSERT INTO metrics 
-		(keypresses, mouse_clicks, idle_time, copy_paste_count, timestamp) 
-		VALUES ($1, $2, $3, $4, $5)`,
-		metrics.Keypresses, metrics.MouseClicks, metrics.IdleTime.Seconds(), metrics.CopyPasteCount, time.Now())
+	_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
+		Keypresses:       int32(metrics.Keypresses),
+		MouseClicks:      int32(metrics.MouseClicks),
+		MouseDistanceIn:  metrics.MouseDistanceIn,
+		MouseDistanceMi:  metrics.MouseDistanceMi,
+		ScrollDistanceIn: metrics.ScrollDistanceIn,
+		ScrollDistanceMi: metrics.ScrollDistanceMi,
+	})
 	if err != nil {
 		logger.Printf("Error saving metrics: %v", err)
 	} else {
-		logger.Println("Metrics saved successfully")
+		metrics.Keypresses = 0
+		metrics.MouseClicks = 0
+		metrics.MouseDistanceIn = 0
+		metrics.MouseDistanceMi = 0
+		metrics.ScrollDistanceIn = 0
+		metrics.ScrollDistanceMi = 0
 	}
+}
+
+func calculateDistance(x1, y1, x2, y2 int) float64 {
+	dx := float64(x2 - x1)
+	dy := float64(y2 - y1)
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+func calculatePixelsPerInch() float64 {
+	if err := glfw.Init(); err != nil {
+		panic(err)
+	}
+	defer glfw.Terminate()
+
+	primaryMonitor := glfw.GetPrimaryMonitor()
+	videoMode := primaryMonitor.GetVideoMode()
+
+	widthMM, heightMM := primaryMonitor.GetPhysicalSize()
+	widthIn, heightIn := float64(widthMM)/25.4, float64(heightMM)/25.4
+
+	widthDpi := float64(videoMode.Width) / widthIn
+	heightDpi := float64(videoMode.Height) / heightIn
+
+	avgDpi := (widthDpi + heightDpi) / 2
+
+	return avgDpi
+}
+
+func getMonitors() []Monitor {
+	glfwMonitors := glfw.GetMonitors()
+	monitors := make([]Monitor, len(glfwMonitors))
+
+	for i, glfwMonitor := range glfwMonitors {
+		videoMode := glfwMonitor.GetVideoMode()
+
+		widthMM, heightMM := glfwMonitor.GetPhysicalSize()
+		widthIn, heightIn := float64(widthMM)/25.4, float64(heightMM)/25.4
+		xPos, yPos := glfwMonitor.GetPos()
+
+		widthDpi := float64(videoMode.Width) / widthIn
+		heightDpi := float64(videoMode.Height) / heightIn
+
+		ppi := (widthDpi + heightDpi) / 2
+
+		monitors[i] = Monitor{
+			XPos:     xPos,
+			YPos:     yPos,
+			WidthPx:  videoMode.Width,
+			HeightPx: videoMode.Height,
+			WidthIn:  int(widthIn),
+			HeightIn: int(heightIn),
+			Ppi:      int(ppi),
+		}
+	}
+
+	return monitors
+}
+
+func calculateMultiMonitorDistance(x1, y1, x2, y2 int) float64 {
+	monitorsMutex.RLock()
+	defer monitorsMutex.RUnlock()
+
+	m1 := getMonitorForCoordinates(x1, y1)
+	m2 := getMonitorForCoordinates(x2, y2)
+
+	if m1 == m2 {
+		return calculateDistance(x1, y1, x2, y2) / float64(m1.Ppi)
+	}
+
+	sx1, sy1 := getMonitorSideCoordinates(x1, y1, x2, y2, m1)
+	d1 := calculateDistance(x1, y1, sx1, sy1) / float64(m1.Ppi)
+
+	sx2, sy2 := getMonitorSideCoordinates(x1, y1, x2, y2, m2)
+	d2 := calculateDistance(x1, y1, sx2, sy2) / float64(m1.Ppi)
+
+	return d1 + d2
+}
+
+func getMonitorForCoordinates(x, y int) Monitor {
+	for _, m := range monitors {
+		if x >= m.XPos && x < (m.XPos+m.WidthPx) && y >= m.YPos && y < (m.YPos+m.HeightPx) {
+			return m
+		}
+	}
+	// Default to monitor 0
+	return monitors[0]
+}
+
+func getMonitorSideCoordinates(x1, y1, x2, y2 int, m Monitor) (int, int) {
+	// Get the coordinates for the side where the mouse leaves.
+	if x2 < m.XPos {
+		return m.XPos, y1
+	} else if x2 >= m.XPos+m.WidthPx {
+		return m.XPos + m.WidthPx - 1, y1
+	} else if y2 < m.YPos {
+		return x1, m.YPos
+	} else if y2 >= m.YPos+m.HeightPx {
+		return x1, m.YPos + m.HeightPx - 1
+	}
+
+	return x2, y2
 }
 
 func getIcon() []byte {
