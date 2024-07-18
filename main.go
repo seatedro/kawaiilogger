@@ -111,40 +111,49 @@ func glfwInit() {
 	monitors = getMonitors()
 }
 
-func initializeDB() error {
+func initializeDB() {
 	if dbQueries != nil {
-		return nil // Database already initialized
+		return // Database already initialized
 	}
 
 	config, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		logger.Fatalf("failed to load config: %e", err)
+		return
 	}
 
 	var sqlDb *sql.DB
 	switch config.Type {
 	case "postgres":
+		logger.Println("Connecting to postgres instance...")
 		sqlDb, err = sql.Open("postgres", config.URL)
 		dbQueries = db.New(sqlDb)
 	case "sqlite":
-		sqlDb, err = sql.Open("sqlite3", config.FilePath)
+		logger.Println("Connecting to sqlite instance...")
+		if config.URL != "" {
+			sqlDb, err = sql.Open("sqlite3", config.URL)
+		} else {
+			sqlDb, err = sql.Open("sqlite3", config.FilePath)
+		}
 		_sqliteDb = sqlDb
 	case "":
 		logger.Println("Setting up default sqlite db...")
-		return setupDefaultSQLite()
+		setupDefaultSQLite()
+		return
 	default:
-		return fmt.Errorf("unsupported database type: %s", config.Type)
+		logger.Fatalf("unsupported database type: %s", config.Type)
+		return
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		logger.Fatalf("failed to open database: %e", err)
+		return
 	}
 
 	if err = sqlDb.Ping(); err != nil {
-		return fmt.Errorf("failed to ping database: %w", err)
+		logger.Fatalf("failed to ping database: %e", err)
 	}
 
-	return nil
 }
 
 func loadConfig() (DBConfig, error) {
@@ -310,7 +319,7 @@ func saveMetrics() {
 	if dbQueries == nil {
 		_, err := _sqliteDb.Exec(`
 		INSERT INTO metrics (keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps)
-		VALUES (?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?)
 	`, metrics.Keypresses, metrics.MouseClicks, metrics.MouseDistanceIn, metrics.MouseDistanceMi, metrics.ScrollSteps)
 
 		if err != nil {
