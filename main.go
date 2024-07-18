@@ -16,27 +16,34 @@ import (
 	"github.com/getlantern/systray"
 	"github.com/go-gl/glfw/v3.3/glfw"
 	"github.com/joho/godotenv"
+	"github.com/spf13/viper"
+
 	_ "github.com/lib/pq"
+	_ "github.com/mattn/go-sqlite3"
 	hook "github.com/robotn/gohook"
 	"github.com/seatedro/kawaiilogger/db"
 )
 
+type DBConfig struct {
+	Type     string
+	URL      string
+	FilePath string
+}
+
 type Metrics struct {
-	Keypresses       int
-	MouseClicks      int
-	MouseDistanceIn  float64
-	MouseDistanceMi  float64
-	ScrollDistanceIn float64
-	ScrollDistanceMi float64
+	Keypresses      int
+	MouseClicks     int
+	MouseDistanceIn float64
+	MouseDistanceMi float64
+	ScrollSteps     int
 }
 
 type TotalMetrics struct {
-	TotalKeypresses       int
-	TotalMouseClicks      int
-	TotalMouseDistanceIn  float64
-	TotalMouseDistanceMi  float64
-	TotalScrollDistanceIn float64
-	TotalScrollDistanceMi float64
+	TotalKeypresses      int
+	TotalMouseClicks     int
+	TotalMouseDistanceIn float64
+	TotalMouseDistanceMi float64
+	TotalScrollSteps     int
 }
 
 type Monitor struct {
@@ -51,12 +58,12 @@ type Monitor struct {
 
 var (
 	dbQueries              *db.Queries
+	_sqliteDb              *sql.DB
 	metrics                *Metrics
 	totalMetrics           *TotalMetrics
 	logger                 *log.Logger
 	logDir                 string
 	lastMouseX, lastMouseY int
-	pixelsPerInch          float64
 	monitors               []Monitor
 	monitorsMutex          sync.RWMutex
 )
@@ -104,24 +111,87 @@ func glfwInit() {
 	monitors = getMonitors()
 }
 
+func initializeDB() error {
+	if dbQueries != nil {
+		return nil // Database already initialized
+	}
+
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	var sqlDb *sql.DB
+	switch config.Type {
+	case "postgres":
+		sqlDb, err = sql.Open("postgres", config.URL)
+		dbQueries = db.New(sqlDb)
+	case "sqlite":
+		sqlDb, err = sql.Open("sqlite3", config.FilePath)
+		_sqliteDb = sqlDb
+	case "":
+		logger.Println("Setting up default sqlite db...")
+		return setupDefaultSQLite()
+	default:
+		return fmt.Errorf("unsupported database type: %s", config.Type)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+
+	if err = sqlDb.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	return nil
+}
+
+func loadConfig() (DBConfig, error) {
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("$HOME/.config/kawaiilogger")
+
+	err := viper.ReadInConfig()
+	if err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			// Config not found. ignore error
+			logger.Println("No config file found... Using defaults.")
+			return DBConfig{Type: ""}, nil
+		} else {
+			return DBConfig{}, fmt.Errorf("failed to read config file: %w", err)
+		}
+	}
+
+	// Load .env if it exists
+	_ = godotenv.Load() // Ignores error if .env doesn't exist
+
+	config := DBConfig{
+		Type:     viper.GetString("database.type"),
+		URL:      viper.GetString("database.url"),
+		FilePath: viper.GetString("database.filepath"),
+	}
+
+	// Overriding with env vars if set
+	if dbType := os.Getenv("KL_DB_TYPE"); dbType != "" {
+		config.Type = dbType
+	}
+	if dbURL := os.Getenv("KL_DB_URL"); dbURL != "" {
+		config.URL = dbURL
+	}
+	if dbFilePath := os.Getenv("KL_DB_FILEPATH"); dbFilePath != "" {
+		config.FilePath = dbFilePath
+	}
+
+	return config, nil
+
+}
+
 func main() {
 	initLogger()
 	glfwInit()
-	pixelsPerInch = calculatePixelsPerInch()
-
-	logger.Printf("Current working directory: %s\n", os.Getenv("PWD"))
-	err := godotenv.Load()
-	if err != nil {
-		logger.Fatal("Error loading .env file:", err)
-	}
-
-	sqlDb, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
-	if err != nil {
-		logger.Fatal("Error connecting to database:", err)
-	}
-	defer sqlDb.Close()
-
-	dbQueries = db.New(sqlDb)
+	initializeDB()
 
 	metrics = &Metrics{}
 	totalMetrics = &TotalMetrics{}
@@ -138,7 +208,7 @@ func onReady() {
 	mKeyPresses := systray.AddMenuItem("Keypresses: 0", "Number of keypresses")
 	mMouseClicks := systray.AddMenuItem("Mouse Clicks: 0", "Number of mouse clicks")
 	mMouseDistance := systray.AddMenuItem("Mouse Travel (in) 0 / (mi) 0", "Distance moved by mouse")
-	mScrollDistance := systray.AddMenuItem("ScrollWheel Travel (in) 0 / (mi) 0", "Distance moved by scrollwheel")
+	mScrollSteps := systray.AddMenuItem("Scroll Steps: 0", "Number of scroll steps")
 
 	systray.AddSeparator()
 	mOpenLog := systray.AddMenuItem("Open Log File", "Open the log file")
@@ -163,7 +233,7 @@ func onReady() {
 			mKeyPresses.SetTitle(fmt.Sprintf("Keypresses: %d", totalMetrics.TotalKeypresses))
 			mMouseClicks.SetTitle(fmt.Sprintf("Mouse Clicks: %d", totalMetrics.TotalMouseClicks))
 			mMouseDistance.SetTitle(fmt.Sprintf("Mouse Travel (in) %.2f / (mi) %.2f", totalMetrics.TotalMouseDistanceIn, totalMetrics.TotalMouseDistanceMi))
-			mScrollDistance.SetTitle(fmt.Sprintf("ScrollWheel Travel (in) %.2f / (mi) %.2f", totalMetrics.TotalScrollDistanceIn, totalMetrics.TotalScrollDistanceMi))
+			mScrollSteps.SetTitle(fmt.Sprintf("Scroll Steps: %d", totalMetrics.TotalScrollSteps))
 		}
 	}()
 }
@@ -219,11 +289,9 @@ func collectMetrics() {
 	})
 
 	hook.Register(hook.MouseWheel, nil, func(e hook.Event) {
-		distance := (math.Abs(float64(e.Rotation)) / pixelsPerInch)
-		metrics.ScrollDistanceIn += distance
-		metrics.ScrollDistanceMi += (distance / 633660)
-		totalMetrics.TotalScrollDistanceIn += distance
-		totalMetrics.TotalScrollDistanceMi += (distance / 63360)
+		distance := int(math.Abs(float64(e.Rotation)))
+		metrics.ScrollSteps += distance
+		totalMetrics.TotalScrollSteps += distance
 	})
 
 	go func() {
@@ -238,24 +306,41 @@ func collectMetrics() {
 }
 
 func saveMetrics() {
+	// We use the sqlite db here
+	if dbQueries == nil {
+		_, err := _sqliteDb.Exec(`
+		INSERT INTO metrics (keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps)
+		VALUES (?, ?, ?, ?, ?)
+	`, metrics.Keypresses, metrics.MouseClicks, metrics.MouseDistanceIn, metrics.MouseDistanceMi, metrics.ScrollSteps)
+
+		if err != nil {
+			logger.Printf("failed to save metrics: %v", err)
+			return
+		}
+		resetMetrics()
+		return
+	}
+
 	_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
-		Keypresses:       int32(metrics.Keypresses),
-		MouseClicks:      int32(metrics.MouseClicks),
-		MouseDistanceIn:  metrics.MouseDistanceIn,
-		MouseDistanceMi:  metrics.MouseDistanceMi,
-		ScrollDistanceIn: metrics.ScrollDistanceIn,
-		ScrollDistanceMi: metrics.ScrollDistanceMi,
+		Keypresses:      int32(metrics.Keypresses),
+		MouseClicks:     int32(metrics.MouseClicks),
+		MouseDistanceIn: metrics.MouseDistanceIn,
+		MouseDistanceMi: metrics.MouseDistanceMi,
+		ScrollSteps:     int32(metrics.ScrollSteps),
 	})
 	if err != nil {
 		logger.Printf("Error saving metrics: %v", err)
 	} else {
-		metrics.Keypresses = 0
-		metrics.MouseClicks = 0
-		metrics.MouseDistanceIn = 0
-		metrics.MouseDistanceMi = 0
-		metrics.ScrollDistanceIn = 0
-		metrics.ScrollDistanceMi = 0
+		resetMetrics()
 	}
+}
+
+func resetMetrics() {
+	metrics.Keypresses = 0
+	metrics.MouseClicks = 0
+	metrics.MouseDistanceIn = 0
+	metrics.MouseDistanceMi = 0
+	metrics.ScrollSteps = 0
 }
 
 func calculateDistance(x1, y1, x2, y2 int) float64 {
@@ -264,24 +349,19 @@ func calculateDistance(x1, y1, x2, y2 int) float64 {
 	return math.Sqrt(dx*dx + dy*dy)
 }
 
-func calculatePixelsPerInch() float64 {
-	if err := glfw.Init(); err != nil {
-		panic(err)
+func getMonitorSideCoordinates(x1, y1, x2, y2 int, m Monitor) (int, int) {
+	// Get the coordinates for the side where the mouse leaves.
+	if x2 < m.XPos {
+		return m.XPos, y1
+	} else if x2 >= m.XPos+m.WidthPx {
+		return m.XPos + m.WidthPx - 1, y1
+	} else if y2 < m.YPos {
+		return x1, m.YPos
+	} else if y2 >= m.YPos+m.HeightPx {
+		return x1, m.YPos + m.HeightPx - 1
 	}
-	defer glfw.Terminate()
 
-	primaryMonitor := glfw.GetPrimaryMonitor()
-	videoMode := primaryMonitor.GetVideoMode()
-
-	widthMM, heightMM := primaryMonitor.GetPhysicalSize()
-	widthIn, heightIn := float64(widthMM)/25.4, float64(heightMM)/25.4
-
-	widthDpi := float64(videoMode.Width) / widthIn
-	heightDpi := float64(videoMode.Height) / heightIn
-
-	avgDpi := (widthDpi + heightDpi) / 2
-
-	return avgDpi
+	return x2, y2
 }
 
 func getMonitors() []Monitor {
@@ -344,21 +424,6 @@ func getMonitorForCoordinates(x, y int) Monitor {
 	return monitors[0]
 }
 
-func getMonitorSideCoordinates(x1, y1, x2, y2 int, m Monitor) (int, int) {
-	// Get the coordinates for the side where the mouse leaves.
-	if x2 < m.XPos {
-		return m.XPos, y1
-	} else if x2 >= m.XPos+m.WidthPx {
-		return m.XPos + m.WidthPx - 1, y1
-	} else if y2 < m.YPos {
-		return x1, m.YPos
-	} else if y2 >= m.YPos+m.HeightPx {
-		return x1, m.YPos + m.HeightPx - 1
-	}
-
-	return x2, y2
-}
-
 func getIcon() []byte {
 	iconPath := "./keyboard.ico"
 	iconBytes, err := os.ReadFile(iconPath)
@@ -367,4 +432,44 @@ func getIcon() []byte {
 	}
 
 	return iconBytes
+}
+
+func setupDefaultSQLite() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home dir: %w", err)
+	}
+
+	dbDir := filepath.Join(homeDir, ".config", "kawaiilogger")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return fmt.Errorf("failed to create database directory: %w", err)
+	}
+
+	dbPath := filepath.Join(dbDir, "kawaiilogger.db")
+	sqlDb, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open default SQLite database: %w", err)
+	}
+
+	// Create tables if they don't exist
+	_, err = sqlDb.Exec(`
+		CREATE TABLE IF NOT EXISTS metrics (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			keypresses INTEGER,
+			mouse_clicks INTEGER,
+			mouse_distance_in REAL,
+			mouse_distance_mi REAL,
+			scroll_steps INTEGER
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create default tables: %w", err)
+	}
+
+	logger.Println("Created default sqlite db...")
+	_sqliteDb = sqlDb
+
+	return nil
+
 }

@@ -22,6 +22,7 @@ go.work
 go.work.sum
 
 # env file
-.env
+.env*
 kawaiilogger
-**/*.DS_Store
+dist
+**/.DS_Store

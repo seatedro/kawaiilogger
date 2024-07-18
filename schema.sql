@@ -4,7 +4,6 @@ CREATE TABLE IF NOT EXISTS metrics (
     mouse_clicks INTEGER NOT NULL,
     mouse_distance_in FLOAT NOT NULL,
     mouse_distance_mi FLOAT NOT NULL,
-    scroll_distance_in FLOAT NOT NULL,
-    scroll_distance_mi FLOAT NOT NULL,
+    scroll_steps INTEGER NOT NULL,
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

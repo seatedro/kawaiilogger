@@ -11,20 +11,19 @@ import (
 
 const createMetrics = `-- name: CreateMetrics :one
 INSERT INTO metrics (
-    keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_distance_in, scroll_distance_mi
+    keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5
 )
-RETURNING id, keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_distance_in, scroll_distance_mi, timestamp
+RETURNING id, keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps, timestamp
 `
 
 type CreateMetricsParams struct {
-	Keypresses       int32
-	MouseClicks      int32
-	MouseDistanceIn  float64
-	MouseDistanceMi  float64
-	ScrollDistanceIn float64
-	ScrollDistanceMi float64
+	Keypresses      int32
+	MouseClicks     int32
+	MouseDistanceIn float64
+	MouseDistanceMi float64
+	ScrollSteps     int32
 }
 
 func (q *Queries) CreateMetrics(ctx context.Context, arg CreateMetricsParams) (Metric, error) {
@@ -33,8 +32,7 @@ func (q *Queries) CreateMetrics(ctx context.Context, arg CreateMetricsParams) (M
 		arg.MouseClicks,
 		arg.MouseDistanceIn,
 		arg.MouseDistanceMi,
-		arg.ScrollDistanceIn,
-		arg.ScrollDistanceMi,
+		arg.ScrollSteps,
 	)
 	var i Metric
 	err := row.Scan(
@@ -43,8 +41,7 @@ func (q *Queries) CreateMetrics(ctx context.Context, arg CreateMetricsParams) (M
 		&i.MouseClicks,
 		&i.MouseDistanceIn,
 		&i.MouseDistanceMi,
-		&i.ScrollDistanceIn,
-		&i.ScrollDistanceMi,
+		&i.ScrollSteps,
 		&i.Timestamp,
 	)
 	return i, err
