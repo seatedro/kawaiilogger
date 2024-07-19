@@ -6,7 +6,7 @@
 
     - keypress count
     - mouse click count
-    - mouse distance traveled
+    - mouse distance traveled (inspo: [@mewtru](https://x.com/trunarla/status/1813279729774158130))
     - scroll step count
 
 
