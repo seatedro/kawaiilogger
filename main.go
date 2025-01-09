@@ -22,6 +22,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	hook "github.com/robotn/gohook"
 	"github.com/seatedro/kawaiilogger/db"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
 )
 
 type DBConfig struct {
@@ -136,6 +137,10 @@ func initializeDB() {
 			sqlDb, err = sql.Open("sqlite3", config.FilePath)
 		}
 		_sqliteDb = sqlDb
+	case "libsql":
+		logger.Println("Connecting to libsql instance...")
+		sqlDb, err = sql.Open("libsql", config.URL)
+		dbQueries = db.New(sqlDb)
 	case "":
 		logger.Println("Setting up default sqlite db...")
 		setupDefaultSQLite()
@@ -331,11 +336,11 @@ func saveMetrics() {
 	}
 
 	_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
-		Keypresses:      int32(metrics.Keypresses),
-		MouseClicks:     int32(metrics.MouseClicks),
+		Keypresses:      int64(metrics.Keypresses),
+		MouseClicks:     int64(metrics.MouseClicks),
 		MouseDistanceIn: metrics.MouseDistanceIn,
 		MouseDistanceMi: metrics.MouseDistanceMi,
-		ScrollSteps:     int32(metrics.ScrollSteps),
+		ScrollSteps:     int64(metrics.ScrollSteps),
 	})
 	if err != nil {
 		logger.Printf("Error saving metrics: %v", err)

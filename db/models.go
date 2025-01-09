@@ -5,15 +5,15 @@
 package db
 
 import (
-	"time"
+	"database/sql"
 )
 
 type Metric struct {
-	ID              int32
-	Keypresses      int32
-	MouseClicks     int32
+	ID              int64
+	Keypresses      int64
+	MouseClicks     int64
 	MouseDistanceIn float64
 	MouseDistanceMi float64
-	ScrollSteps     int32
-	Timestamp       time.Time
+	ScrollSteps     int64
+	Timestamp       sql.NullTime
 }
