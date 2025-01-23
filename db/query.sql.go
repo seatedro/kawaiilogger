@@ -13,17 +13,17 @@ const createMetrics = `-- name: CreateMetrics :one
 INSERT INTO metrics (
     keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps
 ) VALUES (
-    ?, ?, ?, ?, ?
+    $1, $2, $3, $4, $5
 )
 RETURNING id, keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps, timestamp
 `
 
 type CreateMetricsParams struct {
-	Keypresses      int64
-	MouseClicks     int64
+	Keypresses      int32
+	MouseClicks     int32
 	MouseDistanceIn float64
 	MouseDistanceMi float64
-	ScrollSteps     int64
+	ScrollSteps     int32
 }
 
 func (q *Queries) CreateMetrics(ctx context.Context, arg CreateMetricsParams) (Metric, error) {

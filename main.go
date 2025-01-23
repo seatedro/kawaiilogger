@@ -117,6 +117,11 @@ func initializeDB() {
 		return // Database already initialized
 	}
 
+	if err := setupDefaultSQLite(); err != nil {
+		logger.Fatalf("failed to setup local sqlite: %v", err)
+		return
+	}
+
 	config, err := loadConfig()
 	if err != nil {
 		logger.Fatalf("failed to load config: %e", err)
@@ -321,32 +326,29 @@ func collectMetrics() {
 
 func saveMetrics() {
 	// We use the sqlite db here
-	if dbQueries == nil {
-		_, err := _sqliteDb.Exec(`
+	_, err := _sqliteDb.Exec(`
 		INSERT INTO metrics (keypresses, mouse_clicks, mouse_distance_in, mouse_distance_mi, scroll_steps)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?)
 	`, metrics.Keypresses, metrics.MouseClicks, metrics.MouseDistanceIn, metrics.MouseDistanceMi, metrics.ScrollSteps)
 
-		if err != nil {
-			logger.Printf("failed to save metrics: %v", err)
-			return
-		}
-		resetMetrics()
+	if err != nil {
+		logger.Printf("failed to save metrics: %v", err)
 		return
 	}
 
-	_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
-		Keypresses:      int64(metrics.Keypresses),
-		MouseClicks:     int64(metrics.MouseClicks),
-		MouseDistanceIn: metrics.MouseDistanceIn,
-		MouseDistanceMi: metrics.MouseDistanceMi,
-		ScrollSteps:     int64(metrics.ScrollSteps),
-	})
-	if err != nil {
-		logger.Printf("Error saving metrics: %v", err)
-	} else {
-		resetMetrics()
+	if dbQueries != nil {
+		_, err := dbQueries.CreateMetrics(context.Background(), db.CreateMetricsParams{
+			Keypresses:      int32(metrics.Keypresses),
+			MouseClicks:     int32(metrics.MouseClicks),
+			MouseDistanceIn: metrics.MouseDistanceIn,
+			MouseDistanceMi: metrics.MouseDistanceMi,
+			ScrollSteps:     int32(metrics.ScrollSteps),
+		})
+		if err != nil {
+			logger.Printf("Error saving metrics: %v", err)
+		}
 	}
+	resetMetrics()
 }
 
 func resetMetrics() {
